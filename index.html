@@ -156,6 +156,14 @@
   var markers = {};   // van -> L.marker
   var firstFit = true;
 
+  // Leaflet measures its container at init; if the flex layout settles a moment later
+  // the map can render smaller than its box. Re-measure on any size change + a few nudges.
+  function fixSize(){ try{ map.invalidateSize(false); }catch(e){} }
+  if (window.ResizeObserver){ try{ new ResizeObserver(fixSize).observe(document.getElementById("map")); }catch(e){} }
+  window.addEventListener("resize", fixSize);
+  window.addEventListener("load", fixSize);
+  [60,250,600,1500].forEach(function(ms){ setTimeout(fixSize, ms); });
+
   // ---- elements ----
   var el = function(id){ return document.getElementById(id); };
   var cardsEl = el("cards"), bannerEl = el("banner"), gateEl = el("gate");
