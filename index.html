@@ -148,11 +148,19 @@
   var HASTINGS = [50.856, 0.573];
   var VAN_COLOURS = { BV:"#0ea5a4", BVX:"#f59e0b", SV:"#7c3aed" };
   var LS_KEY = "vaneta_dash_key";
+  var FIRST_FIT_REFIT_MS = 4000;   // re-apply the initial fitBounds if the layout resizes within this window
+
+  var el = function(id){ return document.getElementById(id); };
+
+  // localStorage can throw (blocked site data, some private modes) — never let that kill the page
+  function lsGet(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } }
+  function lsSet(k,v){ try{ localStorage.setItem(k,v); }catch(e){} }
+  function lsRemove(k){ try{ localStorage.removeItem(k); }catch(e){} }
 
   // ---- access key ----
   function urlKey(){ try{ return new URLSearchParams(location.search).get("key"); }catch(e){ return null; } }
-  var accessKey = urlKey() || localStorage.getItem(LS_KEY) || "";
-  if (urlKey()){ localStorage.setItem(LS_KEY, urlKey()); // stash then clean the URL so the key isn't shoulder-surfed
+  var accessKey = urlKey() || lsGet(LS_KEY) || "";
+  if (urlKey()){ lsSet(LS_KEY, urlKey()); // stash then clean the URL so the key isn't shoulder-surfed
     try{ history.replaceState(null,"",location.pathname); }catch(e){} }
 
   // ---- map ----
@@ -162,17 +170,32 @@
   }).addTo(map);
   var markers = {};   // van -> L.marker
   var firstFit = true;
+  var firstFitBounds = null, firstFitAt = 0;
 
   // Leaflet measures its container at init; if the flex layout settles a moment later
-  // the map can render smaller than its box. Re-measure on any size change + a few nudges.
-  function fixSize(){ try{ map.invalidateSize(false); }catch(e){} }
-  if (window.ResizeObserver){ try{ new ResizeObserver(fixSize).observe(document.getElementById("map")); }catch(e){} }
-  window.addEventListener("resize", fixSize);
-  window.addEventListener("load", fixSize);
-  [60,250,600,1500].forEach(function(ms){ setTimeout(fixSize, ms); });
+  // the map can render smaller than its box. Re-measure on any container size change,
+  // and if the initial fitBounds ran just before the correction, redo it for the new size.
+  function fixSize(){
+    try{
+      map.invalidateSize(false);
+      if(firstFitBounds && (Date.now()-firstFitAt) < FIRST_FIT_REFIT_MS){ map.fitBounds(firstFitBounds,{maxZoom:15}); }
+    }catch(e){ if(window.console && console.warn) console.warn("Map resize failed", e); }
+  }
+  if (window.ResizeObserver){
+    new ResizeObserver(fixSize).observe(el("map"));   // fires on observe and on every container size change
+  } else {
+    // No ResizeObserver (old WebViews): watch the container dimensions instead, so a
+    // layout that settles late still gets corrected. Window resizes are already
+    // handled by Leaflet's own trackResize.
+    window.addEventListener("load", fixSize);
+    var mapW = 0, mapH = 0;
+    setInterval(function(){
+      var m = el("map");
+      if(m && (m.clientWidth !== mapW || m.clientHeight !== mapH)){ mapW = m.clientWidth; mapH = m.clientHeight; fixSize(); }
+    }, 1000);
+  }
 
   // ---- elements ----
-  var el = function(id){ return document.getElementById(id); };
   var cardsEl = el("cards"), bannerEl = el("banner"), gateEl = el("gate");
 
   function heading(v){ return (v.heading===null||v.heading===undefined||isNaN(v.heading))?null:Number(v.heading); }
@@ -189,7 +212,7 @@
     var arrow = hd===null ? "" :
       '<div class="van-arrow" style="transform:translateX(-50%) rotate('+hd+'deg)"></div>';
     var html = '<div class="van-marker '+(v.stale?"stale":"")+'" style="--c:'+col+'">'+
-               arrow+'<div class="van-pin">'+v.van+'</div></div>';
+               arrow+'<div class="van-pin">'+esc(v.van)+'</div></div>';
     return L.divIcon({className:"", html:html, iconSize:[1,1], iconAnchor:[0,0]});
   }
   function popupHtml(v){
@@ -198,12 +221,12 @@
     var d = driftLabel(v.drift_min);
     var rows = "";
     rows += '<div class="pop-row"><span>Route:</span> '+esc(v.route_id||"—")+'</div>';
-    if(cs) rows += '<div class="pop-row"><span>'+(v.arrived?"At stop:":"Next stop:")+'</span> '+cs.seq+'. '+esc(cs.dog_name||"")+' <span>('+esc(cs.postcode||"")+')</span></div>';
-    rows += '<div class="pop-row"><span>Progress:</span> '+v.done+' of '+v.total+' done</div>';
+    if(cs) rows += '<div class="pop-row"><span>'+(v.arrived?"At stop:":"Next stop:")+'</span> '+esc(cs.seq)+'. '+esc(cs.dog_name||"")+' <span>('+esc(cs.postcode||"")+')</span></div>';
+    rows += '<div class="pop-row"><span>Progress:</span> '+esc(v.done)+' of '+esc(v.total)+' done</div>';
     rows += '<div class="pop-row"><span>Timing:</span> '+d.t+'</div>';
     if(v.speed!==null&&v.speed!==undefined) rows += '<div class="pop-row"><span>Speed:</span> '+Math.round(v.speed)+' km/h</div>';
     rows += '<div class="pop-row"><span>Updated:</span> '+fmtAge(v.age_s)+(v.stale?' · stale':'')+'</div>';
-    return '<div style="--c:'+col+'"><div class="pop-h"><span class="pop-sw"></span>'+v.van+' — '+esc(v.route_type||"")+'</div>'+rows+'</div>';
+    return '<div style="--c:'+col+'"><div class="pop-h"><span class="pop-sw"></span>'+esc(v.van)+' — '+esc(v.route_type||"")+'</div>'+rows+'</div>';
   }
   function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g,function(c){
     return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]; }); }
@@ -222,14 +245,14 @@
       else if(v.arrived) chips += '<span class="chip arr">at stop</span>';
       chips += '<span class="chip '+d.c+'">'+d.t+'</span>';
       var stopHtml = cs
-        ? '<div class="stop">'+(v.arrived?'📍 ':'')+cs.seq+'. '+esc(cs.dog_name||"")+' <small>'+esc(cs.postcode||"")+'</small></div>'
+        ? '<div class="stop">'+(v.arrived?'📍 ':'')+esc(cs.seq)+'. '+esc(cs.dog_name||"")+' <small>'+esc(cs.postcode||"")+'</small></div>'
         : '<div class="none">Route finished or not started.</div>';
-      return '<div class="card '+(v.stale?"stale":"")+'" style="--c:'+col+'" data-van="'+v.van+'">'+
-        '<div class="card-top"><span class="badge" style="--c:'+col+'">'+v.van+'</span>'+
+      return '<div class="card '+(v.stale?"stale":"")+'" style="--c:'+col+'" data-van="'+esc(v.van)+'">'+
+        '<div class="card-top"><span class="badge" style="--c:'+col+'">'+esc(v.van)+'</span>'+
         '<span class="rt">'+esc(v.route_type||"")+'</span><div class="chips">'+chips+'</div></div>'+
         stopHtml+
         '<div class="prog"><i style="--c:'+col+';width:'+pct+'%"></i></div>'+
-        '<div class="stat-row"><span><b>'+v.done+'</b> done · <b>'+v.remaining+'</b> to go</span>'+
+        '<div class="stat-row"><span><b>'+esc(v.done)+'</b> done · <b>'+esc(v.remaining)+'</b> to go</span>'+
         '<span>'+fmtAge(v.age_s)+'</span></div>'+
         '<div class="card-foot"><button class="reset-btn" data-route="'+esc(v.route_id||"")+'" data-van="'+esc(v.van)+'">↺&nbsp;Reset route</button></div>'+
       '</div>';
@@ -279,7 +302,13 @@
     });
     Object.keys(markers).forEach(function(k){ if(!seen[k]){ map.removeLayer(markers[k]); delete markers[k]; } });
     var pts = Object.keys(markers).map(function(k){ return markers[k].getLatLng(); });
-    if(firstFit && pts.length){ map.fitBounds(L.latLngBounds(pts).pad(0.3),{maxZoom:15}); firstFit=false; }
+    if(firstFit && pts.length){
+      firstFit = false;
+      firstFitBounds = L.latLngBounds(pts).pad(0.3);
+      firstFitAt = Date.now();
+      try{ map.invalidateSize(false); }catch(e){}   // the cards render just resized the layout — measure before fitting
+      map.fitBounds(firstFitBounds,{maxZoom:15});
+    }
   }
 
   // ---- connection state ----
@@ -294,35 +323,49 @@
   function hideGate(){ gateEl.classList.remove("show"); }
 
   // ---- polling ----
-  var timer=null, inFlight=false;
+  var timer=null, inFlight=false, inFlightAt=0;
+  var FETCH_TIMEOUT_MS = 12000;    // abort a hung poll well before the next tick
+  var INFLIGHT_STALE_MS = 45000;   // never let the in-flight latch wedge polling (no-AbortController fallback)
+
   function poll(){
-    if(inFlight) return; if(!accessKey){ showGate(); return; }
-    inFlight=true;
-    fetch(API+"?key="+encodeURIComponent(accessKey),{cache:"no-store"})
-      .then(function(r){ return r.json(); })
+    if(!accessKey) return;   // signed out — the gate is already up; ticks must not touch it
+    if(inFlight && (Date.now()-inFlightAt) < INFLIGHT_STALE_MS) return;
+    inFlight=true; inFlightAt=Date.now();
+    var ctrl = window.AbortController ? new AbortController() : null;
+    var killer = ctrl ? setTimeout(function(){ ctrl.abort(); }, FETCH_TIMEOUT_MS) : null;
+    fetch(API+"?key="+encodeURIComponent(accessKey),{cache:"no-store",signal:ctrl?ctrl.signal:undefined})
+      .then(function(r){
+        if(!r.ok) throw new Error("HTTP "+r.status);   // n8n down/deactivated is a fault, NOT "no vans"
+        return r.json();
+      })
       .then(function(data){
-        inFlight=false;
-        if(!data || data.ok===false){
+        inFlight=false; if(killer) clearTimeout(killer);
+        if(data && data.ok===false){
           setConn("warn","Access denied");
-          accessKey=""; localStorage.removeItem(LS_KEY);
+          accessKey=""; lsRemove(LS_KEY);
           showGate("That key was not accepted. Please try again.");
           return;
         }
+        if(!data || data.ok!==true || !Array.isArray(data.vans)) throw new Error("bad payload");
         hideBanner(); hideGate();
-        setConn("ok", data.van_count+(data.van_count===1?" van live":" vans live"));
-        el("updated").textContent = "Updated "+new Date(data.generated_at).toLocaleTimeString("en-GB");
+        var count = Number(data.van_count); if(!isFinite(count)) count = data.vans.length;
+        setConn("ok", count+(count===1?" van live":" vans live"));
+        var when = new Date(data.generated_at);
+        if(!isNaN(when)) el("updated").textContent = "Updated "+when.toLocaleTimeString("en-GB");
         el("safe").className = "safe"+(data.safe_mode?"":" off");
-        el("safe").textContent = data.safe_mode ? "SAFE MODE" : "LIVE EMAILS";
-        var vans = data.vans||[];
+        el("safe").textContent = data.safe_mode ? "SAFE MODE" : "LIVE MESSAGES";
+        var vans = data.vans;
         // vans that are stale or have any signal still show a card; markers need a location
         renderCards(vans);
         updateMarkers(vans);
         if(vans.length && vans.every(function(v){return v.stale;})) setConn("warn","All vans stale");
       })
-      .catch(function(){
-        inFlight=false;
+      .catch(function(err){
+        inFlight=false; if(killer) clearTimeout(killer);
         setConn("bad","Offline");
-        showBanner("Can’t reach the tracking server — retrying…");
+        showBanner(err && err.message==="bad payload"
+          ? "Tracking feed problem — retrying…"
+          : "Can’t reach the tracking server — retrying…");
       });
   }
   function startPolling(){ poll(); if(timer) clearInterval(timer); timer=setInterval(poll, POLL_MS); }
@@ -338,7 +381,7 @@
   function submitKey(){
     var v=el("gatekey").value.trim();
     if(!v){ el("gateerr").textContent="Please enter the key."; return; }
-    accessKey=v; localStorage.setItem(LS_KEY,v); el("gatekey").value="";
+    accessKey=v; lsSet(LS_KEY,v); el("gatekey").value="";
     hideGate(); setConn("warn","Checking…"); poll();
   }
   el("gatego").addEventListener("click", submitKey);
